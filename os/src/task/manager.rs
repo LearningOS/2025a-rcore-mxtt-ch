@@ -4,6 +4,10 @@ use crate::sync::UPSafeCell;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use lazy_static::*;
+
+/// BIG_STRIDE value for stride scheduling algorithm
+const BIG_STRIDE: usize = 10000;
+
 ///A array of `TaskControlBlock` that is thread-safe
 pub struct TaskManager {
     ready_queue: VecDeque<Arc<TaskControlBlock>>,
@@ -23,7 +27,33 @@ impl TaskManager {
     }
     /// Take a process out of the ready queue
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        if self.ready_queue.is_empty() {
+            return None;
+        }
+        
+        // 使用stride调度算法找到stride最小的任务
+        let mut min_stride_index = 0;
+        let mut min_stride = usize::MAX;
+        
+        for (i, task) in self.ready_queue.iter().enumerate() {
+            let task_inner = task.inner_exclusive_access();
+            if task_inner.stride < min_stride {
+                min_stride = task_inner.stride;
+                min_stride_index = i;
+            }
+            drop(task_inner);
+        }
+        
+        // 取出stride最小的任务
+        let task = self.ready_queue.remove(min_stride_index).unwrap();
+        
+        // 更新该任务的stride值
+        let mut task_inner = task.inner_exclusive_access();
+        let pass = BIG_STRIDE / task_inner.priority;
+        task_inner.stride += pass;
+        drop(task_inner);
+        
+        Some(task)
     }
 }
 
