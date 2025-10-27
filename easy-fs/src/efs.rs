@@ -13,8 +13,8 @@ pub struct EasyFileSystem {
     pub inode_bitmap: Bitmap,
     ///Data bitmap
     pub data_bitmap: Bitmap,
-    inode_area_start_block: u32,
-    data_area_start_block: u32,
+    pub inode_area_start_block: u32,
+    pub data_area_start_block: u32,
 }
 
 type DataBlock = [u8; BLOCK_SZ];
@@ -109,6 +109,14 @@ impl EasyFileSystem {
         // acquire efs lock temporarily
         let (block_id, block_offset) = efs.lock().get_disk_inode_pos(0);
         // release efs lock
+        Inode::new(block_id, block_offset, Arc::clone(efs), block_device)
+    }
+    /// 根据inode id获取inode
+    pub fn get_inode_by_id(efs: &Arc<Mutex<Self>>, inode_id: u32) -> Inode {
+        let block_device = Arc::clone(&efs.lock().block_device);
+        // 临时获取efs锁
+        let (block_id, block_offset) = efs.lock().get_disk_inode_pos(inode_id);
+        // 释放efs锁
         Inode::new(block_id, block_offset, Arc::clone(efs), block_device)
     }
     /// Get inode by id

@@ -8,8 +8,8 @@ use alloc::vec::Vec;
 use spin::{Mutex, MutexGuard};
 /// Virtual filesystem layer over easy-fs
 pub struct Inode {
-    block_id: usize,
-    block_offset: usize,
+    pub block_id: usize,
+    pub block_offset: usize,
     fs: Arc<Mutex<EasyFileSystem>>,
     block_device: Arc<dyn BlockDevice>,
 }
@@ -182,5 +182,92 @@ impl Inode {
             }
         });
         block_cache_sync_all();
+    }
+    /// 获取该inode的inode id
+    pub fn get_inode_id(&self) -> u32 {
+        let inode_size = core::mem::size_of::<DiskInode>();
+        let inodes_per_block = (crate::BLOCK_SZ / inode_size) as u32;
+        let fs = self.fs.lock();
+        let inode_area_start_block = fs.inode_area_start_block;
+        drop(fs);
+        let inode_id = ((self.block_id as u32 - inode_area_start_block) * inodes_per_block 
+            + (self.block_offset as u32 / inode_size as u32));
+        inode_id
+    }
+    /// 增加链接计数
+    pub fn inc_nlink(&self) {
+        self.modify_disk_inode(|disk_inode| {
+            disk_inode.nlink += 1;
+        });
+    }
+    /// 减少链接计数
+    pub fn dec_nlink(&self) -> u32 {
+        let mut fs = self.fs.lock();
+        self.modify_disk_inode(|disk_inode| {
+            disk_inode.nlink -= 1;
+            disk_inode.nlink
+        })
+    }
+    /// 获取链接计数
+    pub fn get_nlink(&self) -> u32 {
+        self.read_disk_inode(|disk_inode| disk_inode.nlink)
+    }
+    /// 检查是否为目录
+    pub fn is_dir(&self) -> bool {
+        self.read_disk_inode(|disk_inode| disk_inode.is_dir())
+    }
+    /// 检查是否为文件
+    pub fn is_file(&self) -> bool {
+        self.read_disk_inode(|disk_inode| disk_inode.is_file())
+    }
+    /// 在父目录中创建指向该inode的硬链接
+    pub fn link(&self, parent_dir: Arc<Inode>, name: &str) -> bool {
+        let mut fs = self.fs.lock();
+        // 检查文件是否已存在
+        if let Some(_) = parent_dir.find(name) {
+            return false;
+        }
+        // 添加目录项
+        parent_dir.modify_disk_inode(|disk_inode| {
+            let file_count = (disk_inode.size as usize) / DIRENT_SZ;
+            let new_size = (file_count + 1) * DIRENT_SZ;
+            parent_dir.increase_size(new_size as u32, disk_inode, &mut fs);
+            let dirent = DirEntry::new(name, self.get_inode_id());
+            disk_inode.write_at(
+                file_count * DIRENT_SZ,
+                dirent.as_bytes(),
+                &self.block_device,
+            );
+        });
+        // 增加链接计数
+        self.inc_nlink();
+        block_cache_sync_all();
+        true
+    }
+    /// 根据名称删除目录项，如果找到则返回inode_id
+    pub fn unlink_entry(&self, name: &str) -> Option<u32> {
+        self.modify_disk_inode(|disk_inode| {
+            assert!(disk_inode.is_dir());
+            let file_count = (disk_inode.size as usize) / DIRENT_SZ;
+            let mut dirent = DirEntry::empty();
+            
+            // 查找目录项
+            for i in 0..file_count {
+                disk_inode.read_at(i * DIRENT_SZ, dirent.as_bytes_mut(), &self.block_device);
+                if dirent.name() == name {
+                    let inode_id = dirent.inode_id();
+                    // 移动剩余目录项以填补空缺
+                    for j in (i + 1)..file_count {
+                        disk_inode.read_at(j * DIRENT_SZ, dirent.as_bytes_mut(), &self.block_device);
+                        disk_inode.write_at((j - 1) * DIRENT_SZ, dirent.as_bytes(), &self.block_device);
+                    }
+                    // 减小目录大小
+                    let new_size = (file_count - 1) * DIRENT_SZ;
+                    disk_inode.size = new_size as u32;
+                    return Some(inode_id);
+                }
+            }
+            None
+        })
     }
 }

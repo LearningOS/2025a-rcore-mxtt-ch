@@ -7,7 +7,6 @@ use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
-use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
 
@@ -64,13 +63,21 @@ pub struct TaskControlBlockInner {
 
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
-    pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
 
     /// Heap bottom
     pub heap_bottom: usize,
 
     /// Program break
     pub program_brk: usize,
+
+    /// Stride value for stride scheduling algorithm
+    pub stride: usize,
+    
+    /// Priority value for stride scheduling algorithm
+    pub priority: usize,
+    
+    /// File descriptor table
+    pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
 }
 
 impl TaskControlBlockInner {
@@ -87,7 +94,7 @@ impl TaskControlBlockInner {
         self.get_status() == TaskStatus::Zombie
     }
     pub fn alloc_fd(&mut self) -> usize {
-        if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
+        if let Some(fd) = (0..self.fd_table.len()).find(|&i| self.fd_table[i].is_none()) {
             fd
         } else {
             self.fd_table.push(None);
@@ -125,16 +132,11 @@ impl TaskControlBlock {
                     parent: None,
                     children: Vec::new(),
                     exit_code: 0,
-                    fd_table: vec![
-                        // 0 -> stdin
-                        Some(Arc::new(Stdin)),
-                        // 1 -> stdout
-                        Some(Arc::new(Stdout)),
-                        // 2 -> stderr
-                        Some(Arc::new(Stdout)),
-                    ],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    stride: 0,
+                    priority: 16, // 默认优先级为16
+                    fd_table: Vec::new(),
                 })
             },
         };
@@ -147,6 +149,16 @@ impl TaskControlBlock {
             kernel_stack_top,
             trap_handler as usize,
         );
+        // initialize stdin, stdout, stderr
+        {
+            let mut inner = task_control_block.inner_exclusive_access();
+            if inner.fd_table.len() <= 2 {
+                inner.fd_table.resize(3, None);
+            }
+            inner.fd_table[0] = Some(Arc::new(Stdin));
+            inner.fd_table[1] = Some(Arc::new(Stdout));
+            inner.fd_table[2] = Some(Arc::new(Stdout));
+        }
         task_control_block
     }
 
@@ -165,6 +177,15 @@ impl TaskControlBlock {
         inner.memory_set = memory_set;
         // update trap_cx ppn
         inner.trap_cx_ppn = trap_cx_ppn;
+        // initialize base_size
+        inner.base_size = user_sp;
+        // clear fd_table for new program
+        inner.fd_table.clear();
+        // initialize stdin, stdout, stderr
+        inner.fd_table.resize(3, None);
+        inner.fd_table[0] = Some(Arc::new(Stdin));
+        inner.fd_table[1] = Some(Arc::new(Stdout));
+        inner.fd_table[2] = Some(Arc::new(Stdout));
         // initialize trap_cx
         let trap_cx = TrapContext::app_init_context(
             entry_point,
@@ -191,15 +212,8 @@ impl TaskControlBlock {
         let pid_handle = pid_alloc();
         let kernel_stack = kstack_alloc();
         let kernel_stack_top = kernel_stack.get_top();
-        // copy fd table
-        let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
-        for fd in parent_inner.fd_table.iter() {
-            if let Some(file) = fd {
-                new_fd_table.push(Some(file.clone()));
-            } else {
-                new_fd_table.push(None);
-            }
-        }
+        // inherit parent's file descriptors
+        let fd_table = parent_inner.fd_table.clone();
         let task_control_block = Arc::new(TaskControlBlock {
             pid: pid_handle,
             kernel_stack,
@@ -213,9 +227,11 @@ impl TaskControlBlock {
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
                     exit_code: 0,
-                    fd_table: new_fd_table,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    stride: 0, // 子进程初始stride为0
+                    priority: parent_inner.priority, // 继承父进程优先级
+                    fd_table, // 子进程继承父进程的文件描述符表
                 })
             },
         });

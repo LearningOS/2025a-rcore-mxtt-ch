@@ -53,6 +53,21 @@ impl OSInode {
         }
         v
     }
+    /// 获取inode id
+    pub fn get_inode_id(&self) -> u64 {
+        let inner = self.inner.exclusive_access();
+        inner.inode.get_inode_id() as u64
+    }
+    /// 获取链接计数
+    pub fn get_nlink(&self) -> u32 {
+        let inner = self.inner.exclusive_access();
+        inner.inode.get_nlink()
+    }
+    /// 检查是否为目录
+    pub fn is_dir(&self) -> bool {
+        let inner = self.inner.exclusive_access();
+        inner.inode.is_dir()
+    }
 }
 
 lazy_static! {
