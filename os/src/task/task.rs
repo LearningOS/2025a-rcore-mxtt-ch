@@ -41,6 +41,10 @@ pub struct TaskControlBlockInner {
     pub task_status: TaskStatus,
     /// It is set when active exit or execution error occurs
     pub exit_code: Option<i32>,
+    /// The mutex that this task is currently waiting to acquire (if any)
+    pub waiting_mutex_id: Option<usize>,
+    /// The semaphore that this task is currently waiting to acquire (if any)
+    pub waiting_semaphore_id: Option<usize>,
 }
 
 impl TaskControlBlockInner {
@@ -75,6 +79,8 @@ impl TaskControlBlock {
                     task_cx: TaskContext::goto_trap_return(kstack_top),
                     task_status: TaskStatus::Ready,
                     exit_code: None,
+                    waiting_mutex_id: None,
+                    waiting_semaphore_id: None,
                 })
             },
         }
